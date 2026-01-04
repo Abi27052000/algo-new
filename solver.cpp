@@ -8,204 +8,257 @@
 
 using namespace std;
 
-int boardSize;                  // N
-uint64_t fullBoardMask;         // Bitmask representing all columns (lowest N bits set)
-long long totalSolutionsFound = 0; // Total valid solutions
+/* ---------------- CONFIGURATION ---------------- */
 
-FILE *temporarySolutionFile;    // Temporary file storage
+// If N is large, do not enumerate all solutions
+const int ENUMERATION_LIMIT = 21;
 
-/* --------------------------------------------------
-   BUFFERED OUTPUT SYSTEM
--------------------------------------------------- */
+
+/* ---------------- GLOBAL STATE ---------------- */
+
+int boardSize;                  // Size of the board (N)
+uint64_t fullMask;              // Mask with N lowest bits set
+long long totalSolutions = 0;   // Count of solutions found
+bool terminateSearch = false;   // Stops recursion when limit reached
+
+FILE *solutionTempFile;         // Temporary file for solution storage
+
+/* ---------------- BUFFERED OUTPUT ---------------- */
+
 char outputBuffer[65536];
-int currentBufferPosition = 0;
+int bufferIndex = 0;
 
-void flushBuffer() {
-    if (currentBufferPosition > 0) {
-        fwrite(outputBuffer, 1, currentBufferPosition, temporarySolutionFile);
-        currentBufferPosition = 0;
+void flushOutput()
+{
+    if (bufferIndex > 0)
+    {
+        fwrite(outputBuffer, 1, bufferIndex, solutionTempFile);
+        bufferIndex = 0;
     }
 }
 
-inline void writeInt(int number) {
-    char digitBuffer[16];
-    int digitCount = 0;
-    do {
-        digitBuffer[digitCount++] = char('0' + (number % 10));
-        number /= 10;
-    } while (number);
+inline void writeNumber(int value)
+{
+    char temp[16];
+    int length = 0;
 
-    if (currentBufferPosition + digitCount + 1 >= 65536)
-        flushBuffer();
+    do
+    {
+        temp[length++] = char('0' + (value % 10));
+        value /= 10;
+    } while (value);
 
-    while (digitCount--)
-        outputBuffer[currentBufferPosition++] = digitBuffer[digitCount];
+    if (bufferIndex + length + 1 >= 65536)
+        flushOutput();
+
+    while (length--)
+        outputBuffer[bufferIndex++] = temp[length];
 }
 
-inline void writeSpace() {
-    if (currentBufferPosition >= 65536)
-        flushBuffer();
-    outputBuffer[currentBufferPosition++] = ' ';
+inline void writeSpace()
+{
+    if (bufferIndex >= 65536)
+        flushOutput();
+    outputBuffer[bufferIndex++] = ' ';
 }
 
-inline void writeNewLine() {
-    if (currentBufferPosition >= 65536)
-        flushBuffer();
-    outputBuffer[currentBufferPosition++] = '\n';
+inline void writeLineBreak()
+{
+    if (bufferIndex >= 65536)
+        flushOutput();
+    outputBuffer[bufferIndex++] = '\n';
 }
 
-/* --------------------------------------------------
-   SOLUTION OUTPUT FUNCTIONS
--------------------------------------------------- */
-void printSolution(const vector<int> &queenPositions) {
-    for (int row = 0; row < boardSize; row++) {
-        writeInt(queenPositions[row]);
-        if (row < boardSize - 1) writeSpace();
+/* ---------------- SOLUTION OUTPUT ---------------- */
+
+void writeSolution(const vector<int> &placement)
+{
+    for (int i = 0; i < boardSize; i++)
+    {
+        writeNumber(placement[i]);
+        if (i < boardSize - 1)
+            writeSpace();
     }
-    writeNewLine();
+    writeLineBreak();
 }
 
-/* ---------- RECURSIVE BACKTRACKING SOLVER ------------------------- */
-void solve(uint64_t occupiedColumns, uint64_t occupiedLeftDiagonals, uint64_t occupiedRightDiagonals,
-           vector<int> &queenPositions) {
-    // Base case: all rows filled → solution found
-    if (occupiedColumns == fullBoardMask) {
-        totalSolutionsFound++;
-        printSolution(queenPositions);
+void writeMirroredSolution(const vector<int> &placement)
+{
+    for (int i = 0; i < boardSize; i++)
+    {
+        writeNumber((boardSize + 1) - placement[i]);
+        if (i < boardSize - 1)
+            writeSpace();
+    }
+    writeLineBreak();
+}
+
+/* ---------------- BACKTRACKING SOLVER ---------------- */
+
+void backtrack(uint64_t columns, uint64_t diagLeft, uint64_t diagRight,
+               vector<int> &placement)
+{
+    if (terminateSearch)
+        return;
+
+    // All columns occupied -> valid solution
+    if (columns == fullMask)
+    {
+        totalSolutions++;
+        writeSolution(placement);
+
+        
         return;
     }
 
-    // Available positions (not attacked)
-    uint64_t availablePositions = ~(occupiedColumns | occupiedLeftDiagonals | occupiedRightDiagonals) & fullBoardMask;
+    // Calculate available positions
+    uint64_t available =
+        ~(columns | diagLeft | diagRight) & fullMask;
 
-    while (availablePositions) {
-        uint64_t selectedPosition = availablePositions & -availablePositions;
-        availablePositions -= selectedPosition;
-        int columnIndex = __builtin_ctzll(selectedPosition);
+    while (available)
+    {
+        if (terminateSearch)
+            return;
 
-        queenPositions.push_back(columnIndex + 1);
+        // Select the lowest available column
+        uint64_t bit = available & -available;
+        available -= bit;
 
-        solve(occupiedColumns | selectedPosition,
-              (occupiedLeftDiagonals | selectedPosition) << 1,
-              (occupiedRightDiagonals | selectedPosition) >> 1,
-              queenPositions);
+        int colIndex = __builtin_ctzll(bit);
 
-        queenPositions.pop_back(); // backtrack
+        placement.push_back(colIndex + 1);
+
+        backtrack(columns | bit,
+                  (diagLeft | bit) << 1,
+                  (diagRight | bit) >> 1,
+                  placement);
+
+        placement.pop_back(); // undo placement
     }
 }
 
-/* ------------- SYMMETRY-OPTIMIZED SOLVER (SMALL BOARDS) ------------- */
-void solveWithSymmetry() {
-    if (boardSize <= 1 || boardSize >= 21) {
-        // For N=1 or very large boards, just use standard solver
-        vector<int> queenPositions;
-        solve(0, 0, 0, queenPositions);
+/* ---------------- SYMMETRY OPTIMIZED SOLVER ---------------- */
+
+void solveWithSymmetry()
+{
+    // For large N, skip symmetry optimization
+    if (boardSize >= ENUMERATION_LIMIT)
+    {
+        vector<int> placement;
+        backtrack(0, 0, 0, placement);
         return;
     }
 
-    vector<int> queenPositions;
-    int halfBoard = boardSize / 2;
+    vector<int> placement;
+    int halfColumns = boardSize / 2;
 
-    // Process first half columns (mirror handled later)
-    for (int column = 0; column < halfBoard; column++) {
-        uint64_t selected = 1ULL << column;
-        queenPositions.push_back(column + 1);
+    // Explore only half the first row (mirrors cover the rest)
+    for (int col = 0; col < halfColumns; col++)
+    {
+        uint64_t bit = 1ULL << col;
+        placement.push_back(col + 1);
 
-        auto recursiveSolver = [&](auto &&self, uint64_t cols, uint64_t leftDiag, uint64_t rightDiag) -> void {
-            if (cols == fullBoardMask) {
-                totalSolutionsFound++;
-                printSolution(queenPositions);
+        auto symmetricDFS =
+            [&](auto &&self, uint64_t c, uint64_t l, uint64_t r) -> void
+        {
+            if (c == fullMask)
+            {
+                totalSolutions++;
+                writeSolution(placement);
 
-                // Mirror solution
-                totalSolutionsFound++;
-                vector<int> mirrored = queenPositions;
-                for (auto &pos : mirrored)
-                    pos = boardSize + 1 - pos;
-                printSolution(mirrored);
-
+                totalSolutions++;
+                writeMirroredSolution(placement);
                 return;
             }
 
-            uint64_t available = ~(cols | leftDiag | rightDiag) & fullBoardMask;
-            while (available) {
-                uint64_t pos = available & -available;
-                available -= pos;
-                queenPositions.push_back(__builtin_ctzll(pos) + 1);
-                self(self, cols | pos, (leftDiag | pos) << 1, (rightDiag | pos) >> 1);
-                queenPositions.pop_back();
+            uint64_t possible = ~(c | l | r) & fullMask;
+            while (possible)
+            {
+                uint64_t b = possible & -possible;
+                possible -= b;
+
+                placement.push_back(__builtin_ctzll(b) + 1);
+                self(self, c | b, (l | b) << 1, (r | b) >> 1);
+                placement.pop_back();
             }
         };
 
-        recursiveSolver(recursiveSolver, selected, selected << 1, selected >> 1);
-        queenPositions.pop_back();
+        symmetricDFS(symmetricDFS, bit, bit << 1, bit >> 1);
+        placement.pop_back();
     }
 
-    // Middle column for odd boards
-    if (boardSize % 2 == 1) {
-        int middle = boardSize / 2;
-        uint64_t pos = 1ULL << middle;
-        queenPositions.push_back(middle + 1);
-        solve(pos, pos << 1, pos >> 1, queenPositions);
-        queenPositions.pop_back();
+    // Handle middle column separately for odd N
+    if (boardSize % 2 == 1)
+    {
+        int mid = boardSize / 2;
+        uint64_t bit = 1ULL << mid;
+        placement.push_back(mid + 1);
+        backtrack(bit, bit << 1, bit >> 1, placement);
+        placement.pop_back();
     }
 }
 
-/* --------------------------------------------------
-   MAIN FUNCTION
--------------------------------------------------- */
-int main(int argc, char *argv[]) {
+/* ---------------- MAIN ---------------- */
+
+int main(int argc, char *argv[])
+{
     auto startTime = chrono::high_resolution_clock::now();
 
-    if (argc < 2) {
+    if (argc < 2)
+    {
         cerr << "Usage: ./nqueens_solver <input_file>\n";
         return 1;
     }
 
-    ifstream inputFile(argv[1]);
-    if (!inputFile || !(inputFile >> boardSize)) {
+    ifstream input(argv[1]);
+    if (!input || !(input >> boardSize))
+    {
         cerr << "Invalid input file\n";
         return 1;
     }
 
-    string outputFilePath = string(argv[1]).substr(0, string(argv[1]).find_last_of('.')) + "_output.txt";
+    string outputFile =
+        string(argv[1]).substr(0, string(argv[1]).find_last_of('.')) + "_output.txt";
 
-    // Handle unsolvable cases
-    if ((boardSize < 4 && boardSize != 1)) {
-        ofstream out(outputFilePath);
+    // No solution cases
+    if (boardSize == 2 || boardSize == 3)
+    {
+        ofstream out(outputFile);
         out << "No Solution";
+        cout << "No Solution";
         return 0;
     }
 
-    fullBoardMask = (1ULL << boardSize) - 1;
+    fullMask = (1ULL << boardSize) - 1;
 
-    temporarySolutionFile = tmpfile();
-    if (!temporarySolutionFile) {
+    solutionTempFile = tmpfile();
+    if (!solutionTempFile)
+    {
         cerr << "Failed to create temp file\n";
         return 1;
     }
 
-    // Solve
     solveWithSymmetry();
+    flushOutput();
 
-    flushBuffer();
+    ofstream out(outputFile);
+    out << boardSize << "\n";
+    out << totalSolutions << "\n";
 
-    // Write final output
-    ofstream outputFile(outputFilePath);
-    outputFile << boardSize << "\n";
-    outputFile << totalSolutionsFound << "\n";
-
-    rewind(temporarySolutionFile);
-    char transferBuffer[4096];
+    rewind(solutionTempFile);
+    char copyBuffer[4096];
     size_t bytesRead;
-    while ((bytesRead = fread(transferBuffer, 1, sizeof(transferBuffer), temporarySolutionFile)) > 0)
-        outputFile.write(transferBuffer, bytesRead);
+    while ((bytesRead = fread(copyBuffer, 1, sizeof(copyBuffer), solutionTempFile)) > 0)
+        out.write(copyBuffer, bytesRead);
 
-    fclose(temporarySolutionFile);
+    fclose(solutionTempFile);
 
     auto endTime = chrono::high_resolution_clock::now();
-    cout << "Done. N=" << boardSize
-         << ", Solutions=" << totalSolutionsFound
-         << ", Time=" << chrono::duration_cast<chrono::milliseconds>(endTime - startTime).count()
+
+    cout << "N = " << boardSize << "\n";
+    cout << "Solutions = " << totalSolutions << "\n";
+    cout << "Time = "
+         << chrono::duration_cast<chrono::milliseconds>(endTime - startTime).count()
          << " ms\n";
 
     return 0;
